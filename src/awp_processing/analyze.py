@@ -2,7 +2,8 @@ from pathlib import Path
 import numpy as np
 from collections import defaultdict
 from awp_processing import utils
-from . import read_params
+from .read_params import read_params
+from .filter_BU import filt_B
 
 
 class output():
@@ -82,7 +83,7 @@ class output():
         nx, ny, nz = self.cfg.nx[block], self.cfg.ny[block], self.cfg.nz[block]
         ix, iy, iz = self.reindex_block(ix, iy, iz, block=block)
         
-        v = collections.defaultdict(list)
+        v = defaultdict(list)
         skips = [4 * (j * nz * ny * nx + 
                       iz * ny * nx + 
                       iy * nx + ix) for j in range(self.cfg.wstep)]

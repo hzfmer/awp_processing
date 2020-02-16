@@ -2,7 +2,7 @@
 '''
 
 import argparse
-import utils
+from . import utils 
 
 
 def _convert_arg_line_to_args(arg_line):
