@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 from collections import defaultdict
 from obspy.signal.detrend import polynomial
+import sys
 
 from .utils import AttrDict
 from .read_params import read_params
@@ -31,7 +32,7 @@ class Scenario():
         self.cfg.nz = [0] * self.cfg.g
         print(self.cfg.g)
         for g in range(self.cfg.g):
-            print(type(self.cfg.nedx), type(self.cfg.nskpx), self.cfg.nskpx)
+            # print(type(self.cfg.nedx), type(self.cfg.nskpx), self.cfg.nskpx)
             self.cfg.nx[g] = (self.cfg.nedx[g] - self.cfg.nbgx[g]) // self.cfg.nskpx[g] + 1
             self.cfg.ny[g] = (self.cfg.nedy[g] - self.cfg.nbgy[g]) // self.cfg.nskpy[g] + 1
             self.cfg.nz[g] = (self.cfg.nedz[g] - self.cfg.nbgz[g]) // self.cfg.nskpz[g] + 1
@@ -62,28 +63,31 @@ class Scenario():
         return ix, iy, iz
     
     
-    def read_slice(self, it, ix=-1, iy=-1, iz=-1, block=0, comp="X"):
+    def read_slice(self, t, ix=-1, iy=-1, iz=-1, block=0, comp="X"):
         '''Read wave field snapshot
         Input:
-            it: time step to read
+            t: time to read
             ix, iy, iz (int): Indices of cross-section in the original mesh, 1-indexed
             block: The index of the block, 0-indexed
             comp: different cases of a model, if exists
         '''
         
+        print(f"Params: tmax={self.cfg.tmax}, dt={self.cfg.dt}, wstep={self.cfg.wstep}, tskip={self.cfg.tskip}")
+        if t < 0 or t >= self.cfg.tmax:
+            print(f"Range of t: [0, {self.cfg.tmax}]")
+            sys.exit(-1)
         nt = int(self.cfg.tmax / self.cfg.dt)
         nx, ny, nz = self.cfg.nx[block], self.cfg.ny[block], self.cfg.nz[block]
         ix, iy, iz = self.reindex_block(ix, iy, iz, block=block)
         print(f"\nShape of velocity output: ({nz}, {ny}, {nx})")
-        
-        fnum = int(np.ceil((it + 1) / self.cfg.wstep) * self.cfg.wstep * self.cfg.tskip)
+
+        resi, it = np.divmod(int(t / self.cfg.dt / self.cfg.tskip), self.cfg.wstep) 
+        fnum = (resi + 1) * self.cfg.wstep * self.cfg.tskip 
         file_name = f'{self.output_dir}/S{comp}_{block}_{fnum:07d}'
-        print(f'\r{it} / {nt}, t = {self.cfg.dt * it}s, file = {file_name}', end="\r", flush=True)
+        print(f'\rt = {t}s / {self.cfg.tmax}s, {it * self.cfg.tskip} / {fnum}, file = {file_name}', end="\r", flush=True)
         
         v = np.fromfile(file_name, dtype='float32', count=nz * ny * nx,
                         offset=it * nx * ny * nz * 4).reshape(nz, ny, nx)
-        print(v.shape)
-        print(ix, iy, iz)
         idx = np.where(np.isnan(v))
         if np.isnan(v).any():
             print(f"\n{len(idx[0])} NANs founded\n")
@@ -97,7 +101,7 @@ class Scenario():
         elif iz >= 0:
             v = v[iz, :, :]
             print(f'\nThe z_index is: {iz * self.cfg.nskpz[block]} / {self.cfg.nedz[block]}, Vmax = {np.max(v)}')
-        return v.copy(), idx
+        return v.copy()
     
     
     def read_syn(self, ix, iy, iz=1, block=0):
