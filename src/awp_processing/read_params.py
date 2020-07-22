@@ -2,6 +2,7 @@
 '''
 
 import argparse
+import re
 from . import utils 
 
 
@@ -15,8 +16,33 @@ def _convert_arg_line_to_args(arg_line):
         
 
 def split_arg(string):
-    return list(map(int, string.split(','))) if ',' in string else [int(string)]
+    """Split multiple input args, seperated by ","
+    """
+    return list(map(int, re.findall(r'\d+\.*\d*', string))) if ',' in string else [int(string)]
+#    return list(map(int, map( string.split(','))) if ',' in string else [int(string)]
 
+def to_list(string):
+    return [float(string)]
+
+def ext_block(var, nblocks, ratio=3):
+    """
+    Extend some variables defined in the bottom block only
+
+    Input
+    -----
+    var: float or int
+        Variable in the bottom block
+    nblocks: int
+        Number of blocks, often 2
+    ratio: float
+        ratio between upper block to the block below
+
+    Return
+    ------
+    res : list
+        Variable in all blocks, from top to bottom
+    """
+    return [var * (ratio ** i) for i in range(nblocks)[::-1]]
 
 def read_params(f_param):
     parser = argparse.ArgumentParser(description="Read the parameters in f_param, output the dict containing the options and values", fromfile_prefix_chars="@")
@@ -26,6 +52,7 @@ def read_params(f_param):
     parser.add_argument('-Y', type=int, help='Number of Y-grids in the lowest block')
     parser.add_argument('-Z', type=split_arg, help='List of number of z-grids from top to bottom')
     parser.add_argument('-G', type=int, default=1, help='Number of blocks')
+    parser.add_argument('--DH', type=to_list,  help='Grid spacing in the bottom block')
     parser.add_argument('--NBGX', type=split_arg)
     parser.add_argument('--NBGY', type=split_arg)
     parser.add_argument('--NBGZ', type=split_arg)
@@ -53,8 +80,13 @@ def read_params(f_param):
 
     # If not specified, force to use 1s in skips in every direction
     for c in 'xyz':
-        if not args[f'nskp{c}']:      
+        if not args[f'nskp{c}'] or len(args[f'nskp{c}']) != args['g']:      
             args[f'nskp{c}'] = [1] * args['g']
+
+    if args['g'] > 1:
+        for key in ['x', 'y']:
+            args[key] = ext_block(args[key], args['g'], ratio=3)
+        args['dh'] = ext_block(args['dh'][0], args['g'], ratio=1/3)
 
 
     return args

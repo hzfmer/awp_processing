@@ -26,3 +26,21 @@ class AttrDict(dict):
             raise AttributeError(item)
 
     __setattr__ = __setitem__
+
+import numpy as np
+def save_image(fig):
+    fig.canvas.draw()
+    image = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
+    image = image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    return image
+
+def decimate(arr, limit=1500, count=800):
+    """Decimate snapshots to save memory
+    Return
+    ------
+        [int] steps to skip
+    """
+    if len(arr) > limit:
+        return len(arr) // count
+    return 1
+
