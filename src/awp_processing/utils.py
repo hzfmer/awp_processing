@@ -52,6 +52,33 @@ def distance(lon1, lat1, lon2, lat2):
     return 12742 * np.arcsin(np.sqrt(d))
 
 
+def resize(data1, dt1, data2, dt2, dt):
+    """Trim time series and resample
+    Input
+    -----
+        data1, data2 : list of float
+            Time series
+        dt1, dt2 : float
+            Time steps of data1 and data2
+        dt : float
+            Time step after resampling
+
+    Return
+    ------
+        data1, data2 : list of float
+            Trimmed and resampled time series
+    """
+        
+    from scipy.signal import resample
+    if dt1 != dt:
+        data1 = resample(data1, int(len(data1) * dt1 // dt))
+    if dt2 != dt:
+        data2 = resample(data2, int(len(data2) * dt2 // dt))
+    if len(data1) > len(data2):
+        data1 = data1[:len(data2)]
+    return data1, data2
+
+            
 def comp_fft(data, dt, fmax=None):
     """Compute fft of data
     Input

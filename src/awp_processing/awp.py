@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.colors as colors
 import matplotlib.pyplot as plt
+from matplotlib.ticker import LogFormatter, ScalarFormatter, NullFormatter
 from collections import defaultdict
 from obspy.signal.detrend import polynomial
 from scipy.signal import detrend
@@ -26,7 +27,9 @@ class Scenario:
         Input:
             case (str): different cases of a model, if exists
         '''
-        self.output_dir = Path(model, "output_sfc" if not case else f"{case}")
+        self.model = model
+        self.case = "output_sfc" if not case else f"{case}"
+        self.output_dir = Path(self.model, self.case)
         self.cfg = AttrDict(read_params(Path(model, conf_file)))
         self.shape_of_block()
         
@@ -56,6 +59,7 @@ class Scenario:
         ed = self.cfg['ned' + comp][block]
         skip = self.cfg['nskp' + comp][block]
         if i < 0:
+            print("Likely illegal input index")
             return i, (ed - bg) // skip + 1
         if i < bg or i > ed:
             print(f"i{comp} = {i}: outside output range. Rounded to {min(max(i, bg), ed)}")
@@ -88,7 +92,6 @@ class Scenario:
             print(f"Range of t: [0, {self.cfg.tmax}]")
             sys.exit(-1)
         ix, nx, iy, ny, iz, nz = self.reindex_block(ix, iy, iz, block=block)
-        print(f"\nShape of velocity output: ({nz}, {ny}, {nx})")
 
         resi, it = np.divmod(int(t / self.cfg.dt / self.cfg.tskip), self.cfg.wstep) 
         fnum = (resi + 1) * self.cfg.wstep * self.cfg.tskip 
@@ -101,15 +104,16 @@ class Scenario:
         if np.isnan(v).any():
             print(f"\n{len(idx[0])} NANs founded\n")
         
+        print(f"\nShape of velocity output: (nz, ny, nx) = ({nz}, {ny}, {nx})")
         if ix >= 0:
             v = v[:, :, ix]
-            print(f'\nThe x_index is: {ix * self.cfg.nskpx[block]} / {self.cfg.nedx[block]}, Vmax = {np.max(v)}')
+            print(f'\nThe x_index is: {ix * self.cfg.nskpx[block]} / {self.cfg.nedx[block]} --> ({v.shape})\nOriginal vmax = {np.max(v):.5e}')
         elif iy >= 0:
             v = v[:, iy, :]
-            print(f'\nThe y_index is: {iy * self.cfg.nskpy[block]} / {self.cfg.nedy[block]}, Vmax = {np.max(v)}')
+            print(f'\nThe y_index is: {iy * self.cfg.nskpy[block]} / {self.cfg.nedy[block]} --> ({v.shape})\nOriginal vmax = {np.max(v):.5e}')
         elif iz >= 0:
             v = v[iz, :, :]
-            print(f'\nThe z_index is: {iz * self.cfg.nskpz[block]} / {self.cfg.nedz[block]}, Vmax = {np.max(v)}')
+            print(f'\nThe z_index is: {iz * self.cfg.nskpz[block]} / {self.cfg.nedz[block]} --> ({v.shape})\nOriginal vmax = {np.max(v):.5e}')
         return v.copy()
     
     
@@ -264,17 +268,22 @@ class Scenario:
         ax.set_aspect(aspect)
         ax.invert_yaxis()
         ax.set(xlabel=xlabel, ylabel=ylabel, title=title)
+        ax.tick_params(axis='x', which='both', top=False)  # hide axis ticks
         pos = ax.get_position()
         cax = fig.add_axes([pos.x1 + 0.04, pos.y0, 0.04, pos.y1 - pos.y0])
         cbar = plt.colorbar(im, cax=cax, orientation=orientation, extend='both')
         cbar.set_label(cbar_label)
-        #if np.max(cbar.get_ticks()) < tick_limit:
+        if np.max(cbar.get_ticks()) < tick_limit:
+            formatter = ScalarFormatter(useMathText=True)
+            formatter.set_scientific(True)
+            formatter.set_powerlimits((-2, 2))
+            cbar.ax.yaxis.set_major_formatter(formatter)
         #    cbar.ax.set_yticklabels([f"{i:.2e}" for i in cbar.get_ticks()])
         if fig_name is not None:
             fig.savefig(f"{fig_name}", dpi=600, bbox_inches='tight', pad_inches=0.05)
 
 
-    def plot_slice_x(self, t, ix=0, sy=0, sz=0, maxz=1, vmin=None, vmax=None, block=0, NPY=0, comp='Z', norm='log', space_scale='km', unit='cm/s', aspect='auto', orientation='vertical', xlabel=None, ylabel=None, fig_name=None):
+    def plot_slice_x(self, t, ix=0, sy=0, sz=0, maxz=1, vmin=None, vmax=None, block=0, NPY=0, comp='Z', norm='log', space_scale='km', unit='cm/s', aspect='auto', orientation='vertical', xlabel=None, ylabel=None, mesh_file=None, fig_name=None):
         """Plot snapshot at certain x
         Input
         -----
@@ -306,6 +315,8 @@ class Scenario:
             Orientation of colorbar
         xlabel, ylabel : string
             Labels of x-axis and y-axis of the image
+        mesh_file : string
+            Mesh file name for extracting velocity interface
         fig_name : None or string 
             If string, then save image to file
         """
@@ -317,39 +328,45 @@ class Scenario:
         sy, sz = sy * dh[0], sz * dh[0]
         mesh_bot = 0  # the bottom the each mesh
         cmap = plt.cm.get_cmap('Reds')
-        cmap.set_bad('w')
-        cmap.set_under('w')
+        cmap = plt.cm.get_cmap('RdBu_r')
+        cmap.set_under('k')
+        cmap.set_over('k')
         
         fig, ax = plt.subplots(dpi=400)
         fig.tight_layout()
         for i in range(block + 1):
-            ix = (ix - 1) // (3 ** i) + 1
-            v = np.abs(self.read_slice(t, ix=ix, block=block, comp=comp))
+            ix_in_block = (ix - 1) // (cfg.ratio ** i) + 1
+            v = self.read_slice(t, ix=ix_in_block, block=block, comp=comp)
             if unit == 'cm/s':
                 v = v * 100
-            vmax = 0.8 * np.max(v) if i == 0 and vmax is None else vmax
-            vmin = 1.2 * np.min(v) + vmax/100 if i == 0 and vmin is None else vmin
+            print(f"Unit converted to {unit}: vmin = {np.min(v):.3e}; vmax = {np.max(v):.3e}")
+            # v[v < 0] = 0
+            vmax = (1 - 0.2 * np.sign(np.max(v))) * np.max(v) if i == 0 and vmax is None else vmax
+            vmin = (1 + 0.2 * np.sign(np.min(v))) * np.min(v) + vmax / 100 if i == 0 and vmin is None else vmin
             if norm == 'log':
-                #norm = colors.SymLogNorm(linthresh=1e-4, linscale=1e-4, base=10)
-                norm = colors.LogNorm(vmin=vmin)  # focus on larger values
+                norm = colors.SymLogNorm(linthresh=vmax/10, linscale=1, base=10)
+                #norm = colors.LogNorm(vmin=vmin)  # focus on larger values
                 #norm = colors.PowerNorm(gamma=0.5)  # focus on small values
             else:
                 norm = None
                 
-            ry = np.arange(cfg.nbgy[block] - 1, cfg.nedy[block], cfg.nskpy[block]) * dh[block]
-            rz = np.arange(cfg.nbgz[block] - 1, cfg.nedz[block], cfg.nskpz[block]) * dh[block]
+            ry = np.arange(cfg.nbgy[block] - 1, cfg.nedy[block], cfg.nskpy[block])
+            rz = np.arange(cfg.nbgz[block] - 1, cfg.nedz[block], cfg.nskpz[block])
             stepy = decimate(ry)
             stepz = decimate(rz)
-            rz = rz[::stepz]
-            idx_z = np.argwhere(rz <= maxz).squeeze()
-            #print(rz.shape, ry[::stepy].shape, v[idx_z, ::stepy].shape)
-            im = ax.pcolormesh(ry[::stepy], rz[idx_z] + mesh_bot, v[idx_z, ::stepy], vmin=vmin, vmax=vmax, norm=norm, cmap=cmap)
+            idx_z = np.nonzero(rz * dh[block] + mesh_bot <= maxz)[0][::stepz]
+            im = ax.pcolormesh(ry[::stepy] * dh[block], rz[idx_z] * dh[block] + mesh_bot, v[idx_z, ::stepy], vmin=vmin, vmax=vmax, norm=norm, cmap=cmap)
+            if mesh_file is not None:
+                mesh = np.fromfile(f'{mesh_file}_{i}', dtype='float32').reshape(cfg.z[i], cfg.y[i], cfg.x[i], cfg.nvar)[np.ix_(rz, ry, [ix - 1], [1])].squeeze()
+                ax.contour(ry[::stepy] * dh[block], rz[idx_z] * dh[block] + mesh_bot, mesh[idx_z, ::stepy], 3, cmap='gray', linewidths=0.8)
             mesh_bot += (cfg.z[block] - 7) * dh[block]
             print(f'Mesh bottom of block {block} is = {mesh_bot}')
         if sy > 0 or sz > 0:
             ax.scatter(sy, sz, 150, color='g', marker='*')
+            ax.axhline(sz, color='g')
         for i in range(1, NPY):
             ax.axvline(cfg.y[0] // i * dh[0], linestyle=':', linewidth=1.2, color='c')
+
 
         title = f'T = {t:.3f}s'
         xlabel = xlabel or f'X ({space_scale})'
@@ -359,7 +376,7 @@ class Scenario:
         return save_image(fig)
 
 
-    def plot_slice_y(self, t, iy=0, sx=0, sz=0, maxz=1, vmin=None, vmax=None, block=0, NPX=0, comp='Z', norm='log', space_scale='km', unit='cm/s', aspect='auto', orientation='vertical', xlabel=None, ylabel=None, fig_name=None):
+    def plot_slice_y(self, t, iy=0, sx=0, sz=0, maxz=1, vmin=None, vmax=None, block=0, NPX=0, comp='Z', norm='log', space_scale='km', unit='cm/s', aspect='auto', orientation='vertical', xlabel=None, ylabel=None, mesh_file=None, fig_name=None):
         """Plot snapshot at certain x
         Input
         -----
@@ -391,6 +408,8 @@ class Scenario:
             Orientation of colorbar
         xlabel, ylabel : string
             Labels of x-axis and y-axis of the image
+        mesh_file : string
+            Mesh file name for extracting velocity interface
         fig_name : None or string 
             If string, then save image to file
         """
@@ -402,36 +421,42 @@ class Scenario:
         sx, sz = sx * dh[0], sz * dh[0]
         mesh_bot = 0  # the bottom the each mesh
         cmap = plt.cm.get_cmap('Reds')
-        cmap.set_bad('w')
-        cmap.set_under('w')
+        cmap = plt.cm.get_cmap('RdBu_r')
+        cmap.set_under('k')
+        cmap.set_over('k')
         
         fig, ax = plt.subplots(dpi=400)
         fig.tight_layout()
         for i in range(block + 1):
-            iy = (iy - 1) // (3 ** i) + 1
-            v = np.abs(self.read_slice(t, iy=iy, block=block, comp=comp))
+            iy_in_block = (iy - 1) // (3 ** i) + 1
+            v = self.read_slice(t, iy=iy_in_block, block=block, comp=comp)
             if unit == 'cm/s':
                 v = v * 100
-            vmax = 0.8 * np.max(v) if i == 0 and vmax is None else vmax
-            vmin = 1.2 * np.min(v) + vmax/100 if i == 0 and vmin is None else vmin
+            print(f"Unit converted to {unit}: vmin = {np.min(v):.3e}; vmax = {np.max(v):.3e}")
+            # v[v < 0] = 0
+            vmax = (1 - 0.2 * np.sign(np.max(v))) * np.max(v) if i == 0 and vmax is None else vmax
+            vmin = (1 + 0.2 * np.sign(np.min(v))) * np.min(v) + vmax / 100 if i == 0 and vmin is None else vmin
             if norm == 'log':
-                #norm = colors.SymLogNorm(linthresh=1e-4, linscale=1e-4, base=10)
-                norm = colors.LogNorm(vmin=vmin)  # focus on larger values
+                norm = colors.SymLogNorm(linthresh=vmax/10, linscale=1, base=10)
+                #norm = colors.LogNorm(vmin=vmin)  # focus on larger values
                 #norm = colors.PowerNorm(gamma=0.5)  # focus on small values
             else:
                 norm = None
                 
-            rx = np.arange(cfg.nbgx[block] - 1, cfg.nedx[block], cfg.nskpx[block]) * dh[block]
-            rz = np.arange(cfg.nbgz[block] - 1, cfg.nedz[block], cfg.nskpz[block]) * dh[block]
+            rx = np.arange(cfg.nbgx[block] - 1, cfg.nedx[block], cfg.nskpx[block])
+            rz = np.arange(cfg.nbgz[block] - 1, cfg.nedz[block], cfg.nskpz[block])
             stepx = decimate(rx)
             stepz = decimate(rz)
-            rz = rz[::stepz]
-            idx_z = np.argwhere(rz <= maxz).squeeze()
-            im = ax.pcolormesh(rx[::stepx], rz[idx_z] + mesh_bot, v[idx_z, ::stepx], vmin=vmin, vmax=vmax, norm=norm, cmap=cmap)
+            idx_z = np.nonzero(rz * dh[block] + mesh_bot <= maxz)[0][::stepz]
+            im = ax.pcolormesh(rx[::stepx] * dh[block], rz[idx_z] * dh[block] + mesh_bot, v[idx_z, ::stepx], vmin=vmin, vmax=vmax, norm=norm, cmap=cmap)
+            if mesh_file is not None:
+                mesh = np.fromfile(f'{mesh_file}_{i}', dtype='float32').reshape(cfg.z[i], cfg.y[i], cfg.x[i], cfg.nvar)[np.ix_(rz, [iy - 1], rx, [1])].squeeze()
+                ax.contour(rx[::stepx] * dh[block], rz[idx_z] * dh[block] + mesh_bot, mesh[idx_z, ::stepx], 3, cmap='gray')
             mesh_bot += (cfg.z[block] - 7) * dh[block]
             print(f'Mesh bottom of block {block} is = {mesh_bot}')
         if sx > 0 or sz > 0:
             ax.scatter(sx, sz, 150, color='g', marker='*')
+            ax.axhline(sz, color='g')
         for i in range(1, NPX):
             ax.axvline(cfg.x[0] // i * dh[0], linestyle=':', linewidth=1.2, color='c')
         
@@ -444,7 +469,7 @@ class Scenario:
         return save_image(fig)
 
 
-    def plot_slice_z(self, t, iz=0, sx=0, sy=0, vmin=None, vmax=None, block=0, NPX=0, NPY=0, comp='X', topography=None, space_scale='km', unit='cm/s', norm='log', aspect='auto', orientation='vertical', xlabel=None, ylabel=None, fig_name=None):
+    def plot_slice_z(self, t, iz=0, sx=0, sy=0, vmin=None, vmax=None, block=0, NPX=0, NPY=0, comp='X', topography=None, space_scale='km', unit='cm/s', norm='log', aspect='auto', orientation='vertical', xlabel=None, ylabel=None, fig_name=None, lahabra=False):
         """Plot snapshot at certain x
         Input
         -----
@@ -484,11 +509,13 @@ class Scenario:
             dh = [h / 1000 for h in dh]
         sx, sy = sx * dh[0], sy * dh[0]
         
-        v = np.max(self.read_slice(t, iz=iz, block=block, comp=comp))
+        v = self.read_slice(t, iz=iz, block=block, comp=comp)
         if unit == 'cm/s':
             v = v * 100
-        vmax = 0.8 * np.max(v) if i == 0 and vmax is None else vmax
-        vmin = 1.2 * np.min(v) + vmax/100 if i == 0 and vmin is None else vmin
+        print(f"Unit converted to {unit}: vmin = {np.min(v):.3e}; vmax = {np.max(v):.3e}")
+        v[v < 0] = 0
+        vmax = (1 - 0.2 * np.sign(np.max(v))) * np.max(v) if vmax is None else vmax
+        vmin = (1 + 0.2 * np.sign(np.min(v))) * np.min(v) + vmax / 100 if vmin is None else vmin
         if norm == 'log':
             #norm = colors.SymLogNorm(linthresh=1e-4, linscale=1e-4, base=10)
             norm = colors.LogNorm(vmin=vmin)  # focus on larger values
@@ -511,9 +538,12 @@ class Scenario:
         if topography is not None:
             ax.contour(rx[::stepx], ry[::stepy], topography[::stepy, ::stepx], 8, cmap='gist_earth', linewidths=0.5)
         ax.set_aspect(aspect)
-        #ax.invert_yaxis()
+        ax.invert_yaxis()
         if sx > 0 and sy > 0:
             ax.scatter(sx, sy, 150, color='g', edgecolor='k', marker='*')
+            for dx in (-25, 0, 25, 50, 75, 100):
+                for dy in (-50, -25, 0, 25, 50, 75):
+                    ax.scatter(sx + dx * dh[0], sy + dy * dh[0], 20, color='g', edgecolor='k', marker='^')
         for i in range(1, NPX):
             ax.axvline(cfg.x[0] // i * dh[0], linestyle=':', linewidth=1.2, color='c')
         for i in range(1, NPY):
@@ -526,8 +556,9 @@ class Scenario:
         self.help_plot_slice(fig, ax, im, aspect, title, xlabel, ylabel, cbar_label, orientation, fig_name, tick_limit=1e-3)
        
         # For la habra specificaly, plotting coast line
-        coastline = np.genfromtxt('coastline.idx', dtype='int', usecols=[1,2])
-        ax.plot(coastline[:, 0] * dh[0], coastline[:, 1] * dh[0], 'k')
+        if lahabra:
+            coastline = np.genfromtxt('coastline.idx', dtype='int', usecols=[1,2])
+            ax.plot(coastline[:, 0] * dh[0], coastline[:, 1] * dh[0], 'k')
         return save_image(fig)
 
 

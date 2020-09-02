@@ -52,7 +52,7 @@ def read_params(f_param):
     parser.add_argument('-Y', type=int, help='Number of Y-grids in the lowest block')
     parser.add_argument('-Z', type=split_arg, help='List of number of z-grids from top to bottom')
     parser.add_argument('-G', type=int, default=1, help='Number of blocks')
-    parser.add_argument('--DH', type=to_list,  help='Grid spacing in the bottom block')
+    parser.add_argument('--DH', type=float,  help='Grid spacing in the bottom block')
     parser.add_argument('--NBGX', type=split_arg)
     parser.add_argument('--NBGY', type=split_arg)
     parser.add_argument('--NBGZ', type=split_arg)
@@ -78,16 +78,16 @@ def read_params(f_param):
 
     args = utils.AttrDict(vars(parser.parse_known_args([f'@{f_param}'])[0]))
 
+    # Convert some scalars to vectors
+    args['ratio'] = args['z'][0] // args['z'][1] if args['g'] > 1 else 1
+    for key in ['x', 'y']:
+        args[key] = ext_block(args[key], args['g'], ratio=args['ratio'])
+    args['dh'] = ext_block(args['dh'], args['g'], ratio=1/args['ratio'])
+    
     # If not specified, force to use 1s in skips in every direction
     for c in 'xyz':
         if not args[f'nskp{c}'] or len(args[f'nskp{c}']) != args['g']:      
             args[f'nskp{c}'] = [1] * args['g']
-
-    if args['g'] > 1:
-        for key in ['x', 'y']:
-            args[key] = ext_block(args[key], args['g'], ratio=3)
-        args['dh'] = ext_block(args['dh'][0], args['g'], ratio=1/3)
-
 
     return args
 
