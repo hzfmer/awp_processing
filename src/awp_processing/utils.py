@@ -8,7 +8,8 @@ class AttrDict(dict):
     """
 
     def __init__(self, mapping=None):
-        super(AttrDict, self).__init__()
+        #super(AttrDict, self).__init__()
+        super().__init__()
         if mapping is not None:
             for key, value in mapping.items():
                 self.__setitem__(key.lower() if type(key) == str else key, value)
@@ -16,7 +17,7 @@ class AttrDict(dict):
     def __setitem__(self, key, value):
         if isinstance(value, dict):
             value = AttrDict(value)
-        super(AttrDict, self).__setitem__(key, value)
+        super().__setitem__(key, value)
         self.__dict__[key] = value  # for code completion in editors
 
     def __getattr__(self, item):
@@ -27,7 +28,15 @@ class AttrDict(dict):
 
     __setattr__ = __setitem__
 
+
+
 import numpy as np
+from collections.abc import Iterable
+
+def force_iterable(x):
+    return x if isinstance(x, Iterable) or isinstance(x, str) else [x]
+
+
 def save_image(fig):
     fig.canvas.draw()
     image = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
@@ -121,3 +130,18 @@ def comp_fft(data, dt, fmax=None):
     f = f[f <= fmax]
     return fourier.squeeze(), f
 
+def comp_psa(v=dict(), dt=0, vx=None, vy=None, percentiles=[50], osc_freqs=np.logspace(-1, 1, 91), osc_damping=0.05):
+    """Compute pseudospectrum"""
+    # RotD50 for percentiles=[50] 
+    if not dt and 'dt' not in v:
+        print("No dt provided! Abort")
+        return None
+    dt = dt or v['dt']
+    vx = vx or v['x']
+    vy = vy or v['y']
+    accx = np.gradient(vx, dt)
+    accy = np.gradient(vy, dt)
+    # with keys 'osc_freq', 'percentile', 'spec_accel'
+    return my_pyrotd.my_calc_rotated_spec_accels(
+            dt, accx, accy, osc_freqs,
+            osc_damping, percentiles=percentiles)
