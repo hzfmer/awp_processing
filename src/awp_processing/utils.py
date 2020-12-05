@@ -30,11 +30,17 @@ class AttrDict(dict):
 
 
 
-import numpy as np
 from collections.abc import Iterable
 
+import numpy as np
+
+
+def check_iterable(x):
+    return isinstance(x, Iterable) or isinstance(x, str)
+
+    
 def force_iterable(x):
-    return x if isinstance(x, Iterable) or isinstance(x, str) else [x]
+    return x if check_iterable(x) else [x]
 
 
 def save_image(fig):
@@ -129,6 +135,9 @@ def comp_fft(data, dt, fmax=None):
     fourier = fourier[:, f<=fmax]
     f = f[f <= fmax]
     return fourier.squeeze(), f
+
+import my_pyrotd
+
 
 def comp_psa(v=dict(), dt=0, vx=None, vy=None, percentiles=[50], osc_freqs=np.logspace(-1, 1, 91), osc_damping=0.05):
     """Compute pseudospectrum"""

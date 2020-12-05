@@ -1,18 +1,21 @@
 import sys
-import numpy as np
-import matplotlib as mpl 
-import matplotlib.pyplot as plt
 
-def read_mesh(fmesh, nx, ny, nz, ix=-1, iy=-1, iz=-1, nvar=3, ivar=1):
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+def read_mesh(fmesh, nx, ny, nz, ix=-1, iy=-1, iz=-1, nvar=3, ivar=1, nbit=4):
     """
     Input
     -----
     ivar : int 
-        Normally (vp, vs, rho)
-
+        Normally (vp, vs, rho, vp/vs)
+    nbit : int 
+        Size of datatype (4 for float32)
     """
     count = nx * ny * nvar
-    off_layer = 4 * count # single float only
+    off_layer = nbit * count # single float only
     if ix >= 0:
         length = ny * nz
     elif iy >= 0: 
@@ -140,7 +143,7 @@ def check_mesh_cont(fmesh_0, fmesh_1, nx, ny, nz, nvar=3, skip=3, verbose=True, 
     elif plot:
         im=plt.imshow(diff[:, :, loc_z], cmap='RdBu')
         plt.colorbar(im)
-        fig.savefig(f"temp_mesh_diffcont.png", dpi=600, bbox_inches='tight', pad_inches=0.05)
+        plt.savefig(f"temp_mesh_diffcont.png", dpi=600, bbox_inches='tight', pad_inches=0.05)
         print(f"Top and bottom blocks are not consistent! Max_diff = {max_diff}")
     return True
 

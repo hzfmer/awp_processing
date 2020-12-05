@@ -3,22 +3,26 @@ TODO:
     1. Use multiprocessing to accelerate?
     2. Add plot subroutines, maybe in a seperate .py
 '''
-from pathlib import Path
 import sys
-import numpy as np
+from collections import defaultdict
+from pathlib import Path
+
 import matplotlib.colors as colors
 import matplotlib.pyplot as plt
-from matplotlib.ticker import LogFormatter, ScalarFormatter, NullFormatter
-from collections import defaultdict
-from obspy.signal.detrend import polynomial
-from scipy.signal import detrend
-from obspy.signal.konnoohmachismoothing import calculate_smoothing_matrix
+import numpy as np
 import seaborn as sns
+from matplotlib.ticker import LogFormatter, NullFormatter, ScalarFormatter
+from obspy.signal.detrend import polynomial
+from obspy.signal.konnoohmachismoothing import calculate_smoothing_matrix
+from PIL.Image import RASTERIZE
+from scipy.signal import detrend
+
 import my_pyrotd
 
-from .utils import *
-from .read_params import read_params
+from .check import *
 from .filter_BU import filt_B
+from .read_params import read_params
+from .utils import *
 
 
 class Scenario:
@@ -192,7 +196,7 @@ class Scenario:
         Output
         ------
             v : record array
-                Three-component velocities and dt, and 'psa' if psa
+                Three-component velocities and dt, t, and 'psa' if psa
         '''
         comps = [comp.lower() for comp in comps]
         cfg = self.cfg
@@ -451,24 +455,132 @@ class Scenario:
             fig.savefig(f"{fig_name}", dpi=600, bbox_inches='tight', pad_inches=0.05)
 
 
-    def plot_slice_x(self, t, ix=0, sy=0, sz=0, maxz=float('inf'), vmin=None, vmax=None, block=0, v=None, NPY=0, comp='Z', norm='log', cmap='inferno_r', space_scale='km', unit='cm/s', aspect='auto', orientation='vertical', xlabel=None, ylabel=None, sites=None, mesh_file=None, fig_name=None):
+    def plot_mesh(self, ix=-1, iy=-1, iz=-1, sh=0, sz=0, maxz=float('inf'), vmin=None, vmax=None, norm=None,
+            block=0, v=None, ivar=1, cmap='inferno_r', space_scale='km', steph=1, stepz=1,
+            aspect='auto', orientation='vertical', xlabel=None, ylabel=None, sites=None, topography=None,
+            comp_gradient=False, fig_name=None):
         """Plot snapshot at certain x
         Input
         -----
-        t : float
-            time of snapshot
-        ix : int
-            location of snapshot
-        sy, sz : int
-            Index of source (y, z)
+        ix, iy, iz : int 
+            Non-negative value indicates the direction of the cross section
+        sh, sz : int
+            Index of source (horizontal, vertical)
         maxz : float
             Maximu depth to plot, so as to focus on near surface structure
         vmin, vmax : float
             range of velocity to plot
         block : int
             the deepest block to plot
-        NPY : int
-            Partition of GPUs along y
+        norm : 'log' or else
+            If 'log', apply log scale to image
+        space_scale : ['m', 'km']
+            space_scale of axis, to avoid too many digits
+        steph, stepz : int 
+            steps to skip when plotting to save memory
+        aspect : ['auto', 'equal', int]
+            Aspect to transform of figure width to height
+        orientation : ['vertical', 'horizontal']
+            Orientation of colorbar
+        xlabel, ylabel : string
+            Labels of x-axis and y-axis of the image
+        tpography : string
+            Topography file name
+        fig_name : None or string 
+            If string, then save image to file
+        """
+        dir_h = 'y' if ix >= 0 else 'x'  # direction of x axis
+        dir_z = 'z' if iz < 0 else 'y' if iy < 0 else 'x'  # direction of y axis
+        cbar_label = {0: "Vp (m/s)", 1: "Vs (m/s)", 2: "Density (kg/m$^3$)", 3: "Vp/Vs"}
+        if iz >= 0:
+            blocks = force_iterable(block)
+        else:
+            blocks = np.arange(block + 1) if not check_iterable(block) else block  # Nubmer of blocks to query 
+        cfg = self.cfg
+        dh = cfg.dh
+        if space_scale == 'km':
+            dh = [h / 1000 for h in dh]
+        data = {i: dict() for i in blocks}
+        mesh_bot = 0
+        for i in range(blocks[0]):
+            mesh_bot += (cfg.z[i] - 8) * dh[i]
+        
+        for i in blocks:
+            data[i]['rh'] = np.arange(cfg[dir_h][i])[::steph] * dh[i]
+            rz = np.arange(cfg[dir_z][i]) * dh[i]
+            idx_z = np.nonzero(rz + mesh_bot <= maxz)[0][::stepz]
+            if not len(idx_z):
+                print("Out of domain")
+                return
+            data[i]['rz'] = rz[idx_z] + mesh_bot
+            fmesh = Path(self.model, "_".join([cfg.invel, str(i)]))
+            mesh = read_mesh(fmesh, cfg.nx[i], cfg.ny[i], cfg.nz[i],
+                            ix=ix // (cfg.ratio ** i), iy=iy // (cfg.ratio ** i),
+                            iz=iz, nvar=cfg.nvar, ivar=ivar)
+            if comp_gradient:
+                grads = np.gradient(mesh, cfg.dh[i])
+                mesh = np.sqrt(grads[0] ** 2 + grads[1] ** 2)
+            data[i]['mesh'] = mesh[idx_z, ::steph]
+            mesh_bot += (cfg.z[i] - 8) * dh[i]
+            steph, stepz = steph // cfg.ratio, stepz // cfg.ratio
+        
+        vmax = vmax if vmax is not None else np.max([np.max(data[i]['mesh']) for i in blocks])
+        vmin = vmin if vmin is not None else np.min([np.min(data[i]['mesh']) for i in blocks])
+        if 'log' == norm:
+                norm = colors.SymLogNorm(linthresh=vmax/10, linscale=1, base=10)
+                #norm = colors.LogNorm(vmin=vmin)  # focus on smaller values
+                #norm = colors.PowerNorm(gamma=0.5)  # not often used
+        else:
+            norm = None
+
+        fig, ax = plt.subplots(dpi=500)
+        for i in blocks:
+            im = ax.pcolormesh(data[i]['rh'], data[i]['rz'], data[i]['mesh'], vmin=vmin, vmax=vmax,
+            norm=norm, cmap=cmap, rasterized=True)
+
+        if topography is not None and iz >= 0:
+            ax.contour(np.arange(cfg.nx[0])[::steph] * dh[0], np.arange(cfg.nz[0])[::stepz] * dh[0],
+                    topography[::stepz, ::steph], 8, cmap='gist_earth', linewidths=0.5)
+
+        if sh > 0 or sz > 0:
+            ax.scatter(sh * dh[0], sz * dh[0], 150, color='g', marker='*')
+
+        ax.set_aspect(aspect)
+        if iz < 0:
+            ax.invert_yaxis()
+        ax.set(xlabel=xlabel, ylabel=ylabel)
+        ax.tick_params(axis='x', which='both', top=False)  # hide axis ticks
+        pos = ax.get_position()
+        cax = fig.add_axes([pos.x1 + 0.04, pos.y0, 0.04, pos.y1 - pos.y0])
+        cbar = plt.colorbar(im, cax=cax, orientation=orientation, extend='both')
+        cbar.set_label(cbar_label[ivar] if not comp_gradient else (f'$\\Delta$ ({cbar_label[ivar].split()[0]})'))
+        if fig_name is not None:
+            fig.savefig(f"{fig_name}", dpi=600, bbox_inches='tight', pad_inches=0.05)
+        return fig
+
+    def plot_slice(self, t, direction='x', ih=0, sh=0, sz=0, maxz=float('inf'), vmin=None, vmax=None,
+            block=0, v=None, NPH=0, comp='Z', norm='log', cmap='inferno_r', space_scale='km', unit='cm/s',
+            aspect='auto', orientation='vertical', xlabel=None, ylabel=None, sites=None, mesh_file=None,
+            fig_name=None):
+        """Plot snapshot at certain x
+        Input
+        -----
+        t : float
+            time of snapshot
+        direction : ['x', 'y']
+            cross section along x or y direction
+        ih : int
+            location of snapshot
+        sh, sz : int
+            Index of source (horizontal, vertical)
+        maxz : float
+            Maximu depth to plot, so as to focus on near surface structure
+        vmin, vmax : float
+            range of velocity to plot
+        block : int
+            the deepest block to plot
+        NPH : int
+            Partition of GPUs along horizontal direction
         comp : ['X', 'Y', 'Z']
             Component of velocity
         norm : 'log' or else
@@ -489,11 +601,12 @@ class Scenario:
             If string, then save image to file
         """
 
+        direction = direction.lower()
         cfg = self.cfg
         dh = [cfg.dh[i] for i in range(block + 1)]
         if space_scale == 'km':
             dh = [h / 1000 for h in dh]
-        sy, sz = sy * dh[0], sz * dh[0]
+        sh, sz = sh * dh[0], sz * dh[0]
         mesh_bot = 0  # the bottom the each mesh
         cmap = plt.cm.get_cmap(cmap)
         #cmap = sns.cubehelix_palette(light=1, as_cmap=True)
@@ -503,157 +616,88 @@ class Scenario:
         fig, ax = plt.subplots(dpi=400)
         fig.tight_layout()
         for i in range(block + 1):
-            ix_in_block = (ix - 1) // (cfg.ratio ** i) + 1
+            ih_in_block = (ih - 1) // (cfg.ratio ** i) + 1
             if v is None:
-                v = self.read_slice(t, ix=ix_in_block, block=block, comp=comp)
+                if direction == 'x':
+                    v = self.read_slice(t, ix=ih_in_block, block=block, comp=comp)
+                else:
+                    v = self.read_slice(t, iy=ih_in_block, block=block, comp=comp)
             else:
                 resi, it = np.divmod(int(t / self.cfg.dt / self.cfg.tskip), self.cfg.wstep)
-                v = v.reshape(cfg.kz[i], cfg.ky[i], cfg.nt)[:, :, resi * self.cfg.wstep + it]
+                v = v.reshape(cfg.kz[i], cfg['k'+direction][i], cfg.nt)[:, :, resi * self.cfg.wstep + it]
             if unit == 'cm/s':
                 v = v * 100
             print(f"Unit converted to {unit}: vmin = {np.min(v):.3e}; vmax = {np.max(v):.3e}")
-            # v[v < 0] = 0
+            
             vmax = (1 - 0.2 * np.sign(np.max(v))) * np.max(v) if i == 0 and vmax is None else vmax
             vmin = ((1 + 0.2 * np.sign(np.min(v))) * np.min(v) if vmin is None else vmin) + vmax / 100
             if norm == 'log':
                 norm = colors.SymLogNorm(linthresh=vmax/10, linscale=1, base=10)
-                #norm = colors.LogNorm(vmin=vmin)  # focus on larger values
-                #norm = colors.PowerNorm(gamma=0.5)  # focus on small values
+                #norm = colors.LogNorm(vmin=vmin)  # focus on smaller values
+                #norm = colors.PowerNorm(gamma=0.5)  # not often used
             else:
                 norm = None
                 
-            ry = np.arange(cfg.nbgy[block] - 1, cfg.nedy[block], cfg.nskpy[block])
+            rh = np.arange(cfg['nbg' + direction][block] - 1, cfg['ned' + direction][block],
+                            cfg['nskp' + direction][block])
             rz = np.arange(cfg.nbgz[block] - 1, cfg.nedz[block], cfg.nskpz[block])
-            stepy = decimate(ry)
+            steph = decimate(rh)
             stepz = decimate(rz)
             idx_z = np.nonzero(rz * dh[block] + mesh_bot <= maxz)[0][::stepz]
-            im = ax.pcolormesh(ry[::stepy] * dh[block], rz[idx_z] * dh[block] + mesh_bot, v[idx_z, ::stepy], vmin=vmin, vmax=vmax, norm=norm, cmap=cmap, rasterized=True)
+            im = ax.pcolormesh(rh[::steph] * dh[block], rz[idx_z] * dh[block] + mesh_bot, v[idx_z, ::steph],
+                            vmin=vmin, vmax=vmax, norm=norm, cmap=cmap, rasterized=True)
             if mesh_file is not None:
-                mesh = np.fromfile(f'{mesh_file}_{i}', dtype='float32').reshape(cfg.z[i], cfg.y[i], cfg.x[i], cfg.nvar)[np.ix_(rz, ry, [ix - 1], [1])].squeeze()
-                ax.contour(ry[::stepy] * dh[block], rz[idx_z] * dh[block] + mesh_bot, mesh[idx_z, ::stepy], 3, cmap='gray', linewidths=0.8)
-            mesh_bot += (cfg.z[block] - 7) * dh[block]
+                mesh = np.fromfile(f'{mesh_file}_{i}', dtype='float32').reshape(cfg.z[i], cfg[direction][i], cfg.x[i], cfg.nvar)
+                mesh = mesh[np.ix_(rz, rh, [ih - 1], [1])].squeeze()
+                ax.contour(rh[::steph] * dh[block], rz[idx_z] * dh[block] + mesh_bot, mesh[idx_z, ::steph], 3,
+                            cmap='gray', linewidths=0.8)
+            mesh_bot += (cfg.z[block] - 8) * dh[block]
             print(f'Mesh bottom of block {block} is = {mesh_bot}')
-        if sy > 0 or sz > 0:
-            ax.scatter(sy, sz, 150, color='g', marker='*')
+        if sh > 0 or sz > 0:
+            ax.scatter(sh, sz, 150, color='g', marker='*')
             ax.axhline(sz, color='g')
             if sites is not None:
-                for dy in sites:
-                    ax.scatter(sy + dy * dh[0], 0, 35, color='cyan', marker='v')
-                    ax.scatter(sy + dy * dh[0], sz, 12, color='cyan', marker='^')
-        for i in range(1, NPY):
-            ax.axvline(cfg.y[0] // i * dh[0], linestyle=':', linewidth=1.2, color='c')
+                for d in sites:
+                    ax.scatter(sh + d * dh[0], 0, 35, color='cyan', marker='v')
+                    ax.scatter(sh + d * dh[0], sz, 12, color='cyan', marker='^')
+        for i in range(1, NPH):
+            ax.axvline(cfg[direction][0] // i * dh[0], linestyle=':', linewidth=1.2, color='c')
 
 
         title = f'T = {t:.2f}s'
         xlabel = xlabel or f'X ({space_scale})'
-        ylabel = ylabel or f'Y ({space_scale})'
+        ylabel = ylabel or f'Z ({space_scale})'
         cbar_label = f'V{comp} ({unit})'
         self.help_plot_slice(fig, ax, im, aspect, title, xlabel, ylabel, cbar_label, orientation, fig_name, tick_limit=1e-3)
-        return save_image(fig)
+        return fig, ax
+
+    def plot_slice_x(self, t, ix=0, sy=0, sz=0, maxz=float('inf'), vmin=None, vmax=None,
+            block=0, v=None, NPY=0, comp='Z', norm='log', cmap='inferno_r', space_scale='km',
+            unit='cm/s', aspect='auto', orientation='vertical', xlabel=None, ylabel=None,
+            sites=None, mesh_file=None, fig_name=None, to_ndarray=False):
+        args = locals()
+        args['direction'] = 'x'
+        args['ih'] = ix 
+        args['sh'] = sy
+        args['NPH'] = NPY
+        fig, ax = self.plot_slice(**args)
+        return save_image(fig) if to_ndarray else fig
 
 
-    def plot_slice_y(self, t, iy=0, sx=0, sz=0, maxz=float('inf'), v=None, vmin=None, vmax=None, block=0, NPX=0, comp='Z', norm='log', cmap='inferno_r', space_scale='km', unit='cm/s', aspect='auto', orientation='vertical', xlabel=None, ylabel=None, mesh_file=None, sites=None, fig_name=None):
-        """Plot snapshot at certain x
-        Input
-        -----
-        t : float
-            time of snapshot
-        iy : int
-            location of snapshot
-        sx, sz : int
-            Index of source (x, z)
-        maxz : float
-            Maximu depth to plot, so as to focus on near surface structure
-        vmin, vmax : float
-            range of velocity to plot
-        block : int
-            the deepest block to plot
-        NPX : int
-            Partition of GPUs along x
-        comp : ['X', 'Y', 'Z']
-            Component of velocity
-        norm : 'log' or else
-            If 'log', apply log scale to image
-        space_scale : ['m', 'km']
-            space_scale of axis, to avoid too many digits
-        unit : ['m/s', 'cm/s']
-            Unit of metric to plot
-        aspect : ['auto', 'equal', int]
-            Aspect to transform of figure width to height
-        orientation : ['vertical', 'horizontal']
-            Orientation of colorbar
-        xlabel, ylabel : string
-            Labels of x-axis and y-axis of the image
-        mesh_file : string
-            Mesh file name for extracting velocity interface
-        fig_name : None or string 
-            If string, then save image to file
-        """
-
-        cfg = self.cfg
-        dh = [cfg.dh[i] for i in range(block + 1)]
-        if space_scale == 'km':
-            dh = [h / 1000 for h in dh]
-        sx, sz = sx * dh[0], sz * dh[0]
-        mesh_bot = 0  # the bottom the each mesh
-        cmap = plt.cm.get_cmap(cmap)
-        #cmap = sns.cubehelix_palette(light=1, as_cmap=True)
-        cmap.set_under('b')
-        cmap.set_over('r')
-        
-        fig, ax = plt.subplots(dpi=400)
-        fig.tight_layout()
-        for i in range(block + 1):
-            iy_in_block = (iy - 1) // (3 ** i) + 1
-            if v is None:
-                v = self.read_slice(t, iy=iy_in_block, block=block, comp=comp)
-            else:
-                resi, it = np.divmod(int(t / self.cfg.dt / self.cfg.tskip), self.cfg.wstep)
-                v = v.reshape(cfg.kz[i], cfg.kx[i], cfg.nt)[:, :, resi * self.cfg.wstep + it]
-            if unit == 'cm/s':
-                v = v * 100
-            print(f"Unit converted to {unit}: vmin = {np.min(v):.3e}; vmax = {np.max(v):.3e}")
-            # v[v < 0] = 0
-            vmax = (1 - 0.2 * np.sign(np.max(v))) * np.max(v) if i == 0 and vmax is None else vmax
-            vmin = ((1 + 0.2 * np.sign(np.min(v))) * np.min(v) if vmin is None else vmin) + vmax / 100
-            if norm == 'log':
-                norm = colors.SymLogNorm(linthresh=vmax/10, linscale=1, base=10)
-                #norm = colors.LogNorm(vmin=vmin)  # focus on larger values
-                #norm = colors.PowerNorm(gamma=0.5)  # focus on small values
-            else:
-                norm = None
-                
-            rx = np.arange(cfg.nbgx[block] - 1, cfg.nedx[block], cfg.nskpx[block])
-            rz = np.arange(cfg.nbgz[block] - 1, cfg.nedz[block], cfg.nskpz[block])
-            stepx = decimate(rx)
-            stepz = decimate(rz)
-            idx_z = np.nonzero(rz * dh[block] + mesh_bot <= maxz)[0][::stepz]
-            im = ax.pcolormesh(rx[::stepx] * dh[block], rz[idx_z] * dh[block] + mesh_bot, v[idx_z, ::stepx], vmin=vmin, vmax=vmax, norm=norm, cmap=cmap, rasterized=True)
-            if mesh_file is not None:
-                mesh = np.fromfile(f'{mesh_file}_{i}', dtype='float32').reshape(cfg.z[i], cfg.y[i], cfg.x[i], cfg.nvar)[np.ix_(rz, [iy - 1], rx, [1])].squeeze()
-                ax.contour(rx[::stepx] * dh[block], rz[idx_z] * dh[block] + mesh_bot, mesh[idx_z, ::stepx], 3, cmap='gray')
-            mesh_bot += (cfg.z[block] - 7) * dh[block]
-            print(f'Mesh bottom of block {block} is = {mesh_bot}')
-        if sx > 0 or sz > 0:
-            ax.scatter(sx, sz, 150, color='springgreen', marker='*')
-            ax.axhline(sz, color='lime')
-            if sites is not None:
-                for dx in sites:
-                    ax.scatter(sx + dx * dh[0], 0, 35, color='cyan', marker='v')
-                    ax.scatter(sx + dx * dh[0], sz, 12, color='cyan', marker='^')
-        for i in range(1, NPX):
-            ax.axvline(cfg.x[0] // i * dh[0], linestyle=':', linewidth=1.2, color='c')
-        
-        title = f'T = {t:.2f}s'
-        xlabel = xlabel or f'X ({space_scale})'
-        ylabel = ylabel or f'Y ({space_scale})'
-        cbar_label = f'V{comp} ({unit})'
-        self.help_plot_slice(fig, ax, im, aspect, title, xlabel, ylabel, cbar_label, orientation, fig_name, tick_limit=1e-3)
-        
-        return save_image(fig)
+    def plot_slice_y(self, t, iy=0, sx=0, sz=0, maxz=float('inf'), v=None, vmin=None, vmax=None,
+            block=0, NPX=0, comp='Z', norm='log', cmap='inferno_r', space_scale='km', unit='cm/s',
+            aspect='auto', orientation='vertical', xlabel=None, ylabel=None, mesh_file=None,
+            sites=None, fig_name=None, to_ndarray=False):
+        args = locals()
+        args['direction'] = 'y'
+        args['ih'] = iy 
+        args['sh'] = sx
+        args['NPH'] = NPX
+        fig, ax = self.plot_slice(**args)
+        return save_image(fig) if to_ndarray else fig
 
 
-    def plot_slice_z(self, t, iz=0, sx=0, sy=0, vmin=None, vmax=None, block=0, v=None, NPX=0, NPY=0, comp='X', topography=None, space_scale='km', unit='cm/s', left=None, right=None, bot=None, top=None, norm='log', cmap='inferno_r', aspect='auto', orientation='vertical', xlabel=None, ylabel=None, sites_x=None, sites_y=None,lahabra=False, fig_name=None):
+    def plot_slice_z(self, t, iz=0, sx=0, sy=0, vmin=None, vmax=None, block=0, step1=0, step2=0, v=None, NPX=0, NPY=0, comp='X', topography=None, space_scale='km', unit='cm/s', left=None, right=None, bot=None, top=None, norm='log', cmap='inferno_r', aspect='auto', orientation='vertical', xlabel=None, ylabel=None, sites_x=None, sites_y=None,lahabra=False, fig_name=None):
         """Plot snapshot at certain x
         Input
         -----
@@ -698,7 +742,7 @@ class Scenario:
             v = self.read_slice(t, iz=iz, block=block, comp=comp)
         else:
             resi, it = np.divmod(int(t / self.cfg.dt / self.cfg.tskip), self.cfg.wstep)
-            v = v.reshape(cfg.ky[i], cfg.kx[i], cfg.nt)[:, :, resi * self.cfg.wstep + it]
+            v = v.reshape(cfg.ky[block], cfg.kx[block], cfg.nt)[:, :, resi * self.cfg.wstep + it]
         if unit == 'cm/s':
             v = v * 100
         print(f"Unit converted to {unit}: vmin = {np.min(v):.3e}; vmax = {np.max(v):.3e}")
@@ -713,13 +757,13 @@ class Scenario:
             
         rx = np.arange(cfg.nbgx[block] - 1, cfg.nedx[block], cfg.nskpx[block]) * dh[block]
         ry = np.arange(cfg.nbgy[block] - 1, cfg.nedy[block], cfg.nskpy[block]) * dh[block]
-        stepx = decimate(rx)
-        stepy = decimate(ry)
+        step1 = step1 or decimate(rx)
+        step2 = step2 or decimate(ry)
         idx_left = np.searchsorted(rx, left) if left else 0
         idx_right = np.searchsorted(rx, right) if right else len(rx)
         idx_bot = np.searchsorted(ry, bot) if bot else 0
         idx_top = np.searchsorted(ry, top) if top else len(ry) 
-        v = v[idx_bot:idx_top:stepy, idx_left:idx_right:stepx]
+        v = v[idx_bot:idx_top:step2, idx_left:idx_right:step1]
         print(f'After cropping, vmin = {np.min(v):.3e}; vmax = {np.max(v):.3e}')
 
         cmap = plt.cm.get_cmap(cmap)
@@ -730,10 +774,10 @@ class Scenario:
         fig, ax = plt.subplots(dpi=400)
         fig.tight_layout()
         
-        im = ax.pcolormesh(rx[idx_left:idx_right:stepx], ry[idx_bot:idx_top:stepy], v, vmin=vmin, vmax=vmax, norm=norm, cmap=cmap, rasterized=True)
+        im = ax.pcolormesh(rx[idx_left:idx_right:step1], ry[idx_bot:idx_top:step2], v, vmin=vmin, vmax=vmax, norm=norm, cmap=cmap, rasterized=True)
         if topography is not None:
             topography = topography[::cfg.ratio ** block, ::cfg.ratio ** block]
-            ax.contour(rx[idx_left:idx_right:stepx], ry[idx_bot:idx_top:stepy], topography[idx_bot:idx_top:stepy, idx_left:idx_right:stepx], 8, cmap='gist_earth', linewidths=0.5)
+            ax.contour(rx[idx_left:idx_right:step1], ry[idx_bot:idx_top:step2], topography[idx_bot:idx_top:step2, idx_left:idx_right:step1], 8, cmap='gist_earth', linewidths=0.5)
         ax.set_aspect(aspect)
         ax.invert_yaxis()
         if rx[idx_left] < sx < rx[idx_right - 1]  and ry[idx_bot] < sy < ry[idx_top - 1]:
@@ -763,15 +807,70 @@ class Scenario:
 #            idx = np.nonzero(np.logical_and(coasty >= ry[idx_bot], coasty <= ry[idx_top - 1]))
 #            ax.plot(coastx[idx], coasty[idx], 'k')
 
-            recv_x = 1000
-            data_x = cfg.recv_coords[:recv_x, 0] / 1000
-            data_y = cfg.recv_coords[:recv_x, 1] / 1000
-            ax.plot(data_x, data_y, 'k')
-            second = 200000
-            data_x = cfg.recv_coords[second : second + recv_x, 0] / 1000
-            data_y = cfg.recv_coords[second : second + recv_x, 1] / 1000
-            ax.plot(data_x, data_y, 'k')
+            recv_x = 2000
+            data_x = cfg.recv_coords[lahabra : lahabra + recv_x, 0] / 1000
+            data_y = cfg.recv_coords[lahabra : lahabra + recv_x, 1] / 1000
+            ax.plot(data_x[::2], data_y[::2], 'k')
+            ax.plot(data_x[1::2], data_y[1::2], 'k')
 
         return fig #  save_image(fig)
+
+    def plot_recv_cross(self, t, begin_idx, mh, mz, comp='x', cmap='copper_r', steph=1, stepz=1, vmin=None, vmax=None, xlabel=None, ylabel=None, title=None, norm=None, unit='km', orientation='vertical', cbar_label=None, fig_name=None):
+        """Plot receiver output cross section if it's a plane
+        Input
+        -----
+        t : float 
+            Time to plot 
+        begin_idx : int 
+            Index to find plane indices 
+        mh, mz : int, int 
+            Shape of the plane 
+        comp : ['xyz']
+            Component to plot
+        cmap : matplotlib's cmap 
+        steph, stepz : int, int 
+            steps to skip to reduce file size 
+        vmin, vmax : float, float 
+        norm : str
+            'log' for SymLogNorm scale 
+        unit : ['km', 'm']
+            Unit for x/y distances 
+        fig_name : str 
+            Save if exist
+        """
+        scale = 1 / 1000 if unit == "km" else 1
+        cfg = self.cfg
+        comp = comp.lower()
+        nrecv = len(cfg.recv_coords)
+        count = cfg.recv_cpu_buffer_size * cfg.recv_num_writes
+        nt = cfg.recv_steps // cfg.recv_stride
+        nfile = nt // cfg.recv_gpu_buffer_size // count
+        resi, it = np.divmod(int(t * nt / cfg.tmax), nt // nfile)
+        file_name = f"{cfg.recv_file}_{comp}_{(resi + 1) * (cfg.recv_steps // nfile):0{len(str(cfg.recv_steps)) + 1}d}"
+
+        
+        data = np.fromfile(file_name, dtype='float32').reshape(nrecv, -1)[:, it]
+        vmax = vmax if vmax is not None else data.max()
+        vmin = vmin if vmin is not None else data.min()
+        if 'log' == norm:
+            norm = colors.SymLogNorm(linthresh=vmax/10, linscale=1, base=10)
+        data = data[begin_idx : begin_idx + mh * mz].reshape(mz, mh) / 100  # cm/s
+        data_h = cfg.recv_coords[begin_idx : begin_idx + mh * mz].reshape(mz, mh, 3)[0, :, :2] / scale
+        data_x, data_y = data_h[:, 0], data_h[:, 1]
+        data_z = cfg.recv_coords[begin_idx : begin_idx + mh * mz].reshape(mz, mh, 3)[:, 0, 2] / scale
+            
+        fig, ax = plt.subplots(dpi=500)
+        im = ax.pcolormesh(data_x[::steph], data_z[::stepz], data[::stepz, ::steph], cmap=cmap, vmin=vmin, vmax=vmax, norm=norm, rasterized=True)
+        pos = ax.get_position()
+        cax = fig.add_axes([pos.x1 + 0.04, pos.y0, 0.04, pos.y1 - pos.y0])
+        cbar = plt.colorbar(im, cax=cax, orientation=orientation, extend='both')
+        cbar.set_label(cbar_label or f"V_{comp} (cm/s)")
+        ax.set(xlabel=xlabel or f"X ({unit})", ylabel=ylabel or f"Z ({unit})", title=title or f"T = {t:.2f}s, max={np.max(data):.2e}")
+
+        if fig_name:
+            fig.savefig(f"{fig_name}.pdf", dpi=600, bbox_inches='tight', pad_inches=0.05)
+
+
+
 
 

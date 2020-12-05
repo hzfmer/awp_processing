@@ -4,8 +4,11 @@
 import argparse
 import re
 from pathlib import Path
+
 import numpy as np
-from . import utils 
+
+from . import utils
+
 
 def _convert_arg_line_to_args(arg_line):
     for arg in arg_line.split():
@@ -62,7 +65,7 @@ def ext_block(var, nblocks, ratio=3):
     """
     return [var * (ratio ** i) for i in range(nblocks)[::-1]]
 
-def read_params(f_param):
+def read_params(f_param="param.sh"):
     parser = argparse.ArgumentParser(description="Read the parameters in f_param, output the dict containing the options and values", fromfile_prefix_chars="@")
     parser.convert_arg_line_to_args = _convert_arg_line_to_args
 
@@ -87,18 +90,18 @@ def read_params(f_param):
     parser.add_argument('--DT', '-t', type=float)
     parser.add_argument('--TMAX', '-T', type=float)
     parser.add_argument('--NSRC', '-S', type=split_arg, help='Number of sources from top to bottom')
-    parser.add_argument('--NST', '-N', type=int)
+    parser.add_argument('--NST', '-N', type=int, help="Time steps of sources")
     parser.add_argument('--NTISKP', type=int, dest='tskip', help='Step to skip when generating outputs')
     parser.add_argument('--NVAR', type=int, help='Nubmer of variables in the mesh [3, 5, 8]')
-    parser.add_argument('--IVELOCITY', type=int, default=0, help='Aggregative = 1, otherwise 0')
+    parser.add_argument('--IVELOCITY', type=int, default=1, help='Multiplexed = 1, otherwise 0')
     parser.add_argument('--READ_STEP', '-R', type=int, help='Steps in each batch to read the source')
     parser.add_argument('--READ_STEP_GPU', '-Q', type=int, default=1, help='CPU reads larger chunks and send to GPU every READ_STEP_GPU steps')
     parser.add_argument('--WRITE_STEP', '-W', type=int, dest='wstep', help='Steps to write in a single output file')
     parser.add_argument('--SXRGO', default=repr('output_sfc/SX_0_'))
     parser.add_argument('--SYRGO', default=repr('output_sfc/SY_0_'))
     parser.add_argument('--SZRGO', default=repr('output_sfc/SZ_0_'))
-    parser.add_argument('--INSRC', default="source", help='eg. source_0, source_1')
-    parser.add_argument('--INVEL', default="mesh", help='eg. mesh_0, mesh_1')
+    parser.add_argument('--INSRC', default="", help='eg. "source" for source_0, source_1')
+    parser.add_argument('--INVEL', default="", help='eg. "mesh" for mesh_0, mesh_1')
     parser.add_argument('--INTOPO', help='header: (nx, ny, pad_length), shape=(nx, ny)')
     parser.add_argument('--CHKFILE', '-c', default=repr('output_ckp/ckp'))
     parser.add_argument('--OUT', '-o', default=repr('output_sfc'))
